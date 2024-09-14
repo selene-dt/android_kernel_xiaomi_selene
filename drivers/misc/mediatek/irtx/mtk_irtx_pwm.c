@@ -72,8 +72,12 @@ static int mtk_pwm_ir_tx(struct rc_dev *rcdev, unsigned int *txbuf,
 	char *dbglog = logbuf;
 #endif
 
-	pr_info("%s() irtx len=0x%x, pwm=%d\n", __func__,
-		(unsigned int)count, (unsigned int)pwm_ir->pwm_ch);
+	printk("%s() --lyd, irtx write len=0x%x, pwm=%d\n", __func__,
+		(unsigned int)count, (unsigned int)irtx_pwm_config.pwm_no);
+	if (count == 0) {
+		ret = 0;
+		goto exit_1;
+	}
 
 	/* lirc txbuf is odd, consumerir will append a "1" at last
 	 * if original pattern_len is even.
@@ -210,6 +214,132 @@ static int mtk_pwm_ir_set_duty_cycle(struct rc_dev *dev, u32 duty_cycle)
 		pwm_ir->duty_cycle = 1;
 	}
 
+	switch (cmd) {
+	case COMPAT_IRTX_IOC_GET_SOLUTTION_TYPE:
+	case COMPAT_IRTX_IOC_SET_IRTX_LED_EN:
+	case COMPAT_IRTX_IOC_SET_DUTY_CYCLE:
+	case COMPAT_IRTX_IOC_SET_CARRIER_FREQ:
+		pr_debug("irtx compat_ioctl : command: 0x%x\n", cmd);
+		return file->f_op->unlocked_ioctl(
+			file, cmd, (unsigned long)compat_ptr(arg));
+		break;
+	default:
+		pr_info("irtx compat_ioctl : No such command!! 0x%x\n", cmd);
+		return -ENOIOCTLCMD;
+	}
+}
+#endif
+
+
+static struct file_operations const char_dev_fops = {
+	.owner = THIS_MODULE,
+	.open = &dev_char_open,
+	.release = &dev_char_close,
+	.read = &dev_char_read,
+	.write = &dev_char_write,
+	.unlocked_ioctl = &dev_char_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl = &compat_dev_char_ioctl,
+#endif
+};
+
+static int irtx_probe(struct platform_device *plat_dev)
+{
+	struct cdev *c_dev;
+	dev_t dev_t_irtx;
+	struct device *dev = NULL;
+	static void *dev_class;
+	u32 major = 0, minor = 0;
+	int ret = 0;
+
+	if (plat_dev->dev.of_node == NULL) {
+		pr_notice("%s() irtx OF node is NULL!\n", __func__);
+		printk("--lyd, %s() irtx OF node is NULL!\n", __func__);
+		ret = -1;
+		goto exit;
+	}
+
+	printk("[%s]: --lyd, enter probe......\n", __func__);
+
+	of_property_read_u32(plat_dev->dev.of_node, "major", &major);
+	of_property_read_u32(plat_dev->dev.of_node, "pwm_ch",
+		&mt_irtx_dev.pwm_ch);
+	of_property_read_u32(plat_dev->dev.of_node, "pwm_data_invert",
+		&mt_irtx_dev.pwm_data_invert);
+	pr_info("%s() device tree info: major=%d pwm=%d invert=%d\n", __func__,
+		major, mt_irtx_dev.pwm_ch, mt_irtx_dev.pwm_data_invert);
+
+	mt_irtx_dev.ppinctrl_irtx = devm_pinctrl_get(&plat_dev->dev);
+	if (IS_ERR(mt_irtx_dev.ppinctrl_irtx)) {
+		pr_notice("%s() [PinC]cannot find pinctrl! ptr_err:%ld.\n",
+			__func__, PTR_ERR(mt_irtx_dev.ppinctrl_irtx));
+		ret = PTR_ERR(mt_irtx_dev.ppinctrl_irtx);
+		goto exit;
+	}
+
+	mt_irtx_dev.buck = regulator_get_optional(NULL, "irtx_ldo");
+	if (IS_ERR(mt_irtx_dev.buck)) {
+		mt_irtx_dev.buck = NULL;
+		pr_notice("%s() irtx_ldo regulator not found\n", __func__);
+	} else {
+		ret = regulator_set_voltage(mt_irtx_dev.buck, 2800000, 2800000);
+		if (ret < 0) {
+			pr_notice("%s() regulator_set_voltage fail! ret:%d.\n",
+				__func__, ret);
+			goto exit;
+		}
+	}
+
+	switch_irtx_gpio(IRTX_GPIO_MODE_LED_DEFAULT);
+
+	if (!major) {
+		ret = alloc_chrdev_region(&dev_t_irtx, 0, 1, irtx_driver_name);
+		if (ret) {
+			pr_notice("%s() alloc_chrdev_region fail! ret=%d.\n",
+				__func__, ret);
+			goto exit;
+		} else {
+			major = MAJOR(dev_t_irtx);
+			minor = MINOR(dev_t_irtx);
+		}
+	} else {
+		dev_t_irtx = MKDEV(major, minor);
+		ret = register_chrdev_region(dev_t_irtx, 1, irtx_driver_name);
+		if (ret) {
+			pr_notice("%s() register_chrdev_region fail! ret=%d.\n",
+				__func__, ret);
+			goto exit;
+		}
+	}
+
+	irtx_pwm_config.pwm_no = mt_irtx_dev.pwm_ch;
+
+	mt_irtx_dev.plat_dev = plat_dev;
+	mt_irtx_dev.plat_dev->dev.dma_mask = &irtx_dma_mask;
+	mt_irtx_dev.plat_dev->dev.coherent_dma_mask = irtx_dma_mask;
+
+	c_dev = kmalloc(sizeof(struct cdev), GFP_KERNEL);
+	if (!c_dev) {
+		ret = -ENOMEM;
+		goto exit;
+	}
+
+	cdev_init(c_dev, &char_dev_fops);
+	c_dev->owner = THIS_MODULE;
+	ret = cdev_add(c_dev, dev_t_irtx, 1);
+	if (ret) {
+		pr_notice("%s() cdev_add fail! ret=%d\n", __func__, ret);
+		goto exit;
+	}
+
+	dev_class = class_create(THIS_MODULE, irtx_driver_name);
+	dev = device_create(dev_class, NULL, dev_t_irtx, NULL, "irtx");
+	if (IS_ERR(dev)) {
+		ret = PTR_ERR(dev);
+		pr_notice("%s() device_create fail! ret=%d\n", __func__, ret);
+		goto exit;
+	}
+	pr_info("%s() Done.\n", __func__);
 	return 0;
 }
 
