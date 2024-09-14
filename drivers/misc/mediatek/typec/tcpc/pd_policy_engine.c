@@ -1333,20 +1333,13 @@ static inline uint8_t pd_try_get_active_event(
 static inline uint8_t pd_try_get_next_event(
 	struct tcpc_device *tcpc, struct pd_event *pd_event)
 {
-	uint8_t ret = 0;
-	struct pd_port *pd_port = &tcpc->pd_port;
-
 	if (pd_get_event(tcpc, pd_event))
 		return PE_NEW_EVT_PD;
 
 	if (pd_try_get_vdm_event(tcpc, pd_event))
 		return PE_NEW_EVT_VDM;
 
-	mutex_lock(&pd_port->pd_lock);
-	ret = pd_try_get_active_event(tcpc, pd_event);
-	mutex_unlock(&pd_port->pd_lock);
-
-	return ret;
+	return pd_try_get_active_event(tcpc, pd_event);
 }
 
 /*
@@ -1384,11 +1377,20 @@ int pd_policy_engine_run(struct tcpc_device *tcpc)
 	struct pd_port *pd_port = &tcpc->pd_port;
 	struct pd_event *pd_event = pd_get_curr_pd_event(pd_port);
 
-	ret = pd_try_get_next_event(tcpc, pd_event);
-	if (ret == PE_NEW_EVT_NULL) {
-		loop = false;
-		goto out;
+	/*K19A WXYFB-996 K19A charger by wangchao at 2021/3/31 start*/
+	if(tcpc->ops->set_msg_header == NULL)
+	{
+		pr_err("tcpc->ops->set_msg_header == NULL , return\n");
+		return false;
 	}
+	/*K19A WXYFB-996 K19A charger by wangchao at 2021/3/31 end*/
+
+	ret = pd_try_get_next_event(tcpc, pd_event);
+
+	if (ret == PE_NEW_EVT_NULL)
+		return false;
+
+	pd_port->curr_is_vdm_evt = (ret == PE_NEW_EVT_VDM);
 
 	mutex_lock(&pd_port->pd_lock);
 
@@ -1398,6 +1400,6 @@ int pd_policy_engine_run(struct tcpc_device *tcpc)
 	pd_handle_dpm_immediately(pd_port, pd_event);
 
 	mutex_unlock(&pd_port->pd_lock);
-out:
-	return loop;
+
+	return 1;
 }

@@ -502,6 +502,11 @@ static const char * const pe_vdm_cmd_name[] = {
 	"Attention",
 };
 
+static const char *const pe_vdm_dp_cmd_name[] = {
+	"DPStatus",
+	"DPConfig",
+};
+
 #if PE_INFO_ENABLE
 static const char *const pe_vdm_cmd_type_name[] = {
 	"INIT",
@@ -574,7 +579,7 @@ static inline void print_vdm_msg(
 	if (cmd_type >= ARRAY_SIZE(pe_vdm_cmd_type_name))
 		return;
 
-	PE_INFO("%s:%s\n", name, pe_vdm_cmd_type_name[cmd_type]);
+	PE_INFO("%s:%s\r\n", name, pe_vdm_cmd_type_name[cmd_type]);
 #endif /* PE_INFO_ENABLE */
 
 #endif	/* PE_EVT_INFO_VDM_DIS */

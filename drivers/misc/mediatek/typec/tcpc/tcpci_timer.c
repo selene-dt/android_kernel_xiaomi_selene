@@ -390,7 +390,7 @@ static inline void on_pe_timer_timeout(
 
 #ifdef CONFIG_USB_PD_SAFE0V_TIMEOUT
 	case PD_TIMER_VSAFE0V_TOUT:
-		TCPC_INFO("VSafe0V TOUT (%d)\n", tcpc->vbus_level);
+		TCPC_INFO("VSafe0V TOUT (%d)\r\n", tcpc->vbus_level);
 		if (!tcpci_check_vbus_valid_from_ic(tcpc))
 			pd_put_vbus_safe0v_event(tcpc);
 		break;
@@ -418,7 +418,7 @@ static inline void on_pe_timer_timeout(
 	case PD_PE_VDM_POSTPONE:
 		tcpc->pd_postpone_vdm_timeout = true;
 		atomic_inc(&tcpc->pending_event);
-		wake_up(&tcpc->event_wait_que);
+		wake_up_interruptible(&tcpc->event_loop_wait_que);
 		break;
 
 	case PD_TIMER_PE_IDLE_TOUT:
@@ -436,7 +436,7 @@ static inline void on_pe_timer_timeout(
 #define TCPC_TIMER_TRIGGER()	do \
 {				\
 	tcpc_set_timer_tick(tcpc, index);	\
-	wake_up(&tcpc->timer_wait_que);	\
+	wake_up_interruptible(&tcpc->timer_wait_que);	\
 } while (0)
 
 #ifdef CONFIG_USB_POWER_DELIVERY
@@ -531,6 +531,16 @@ static enum hrtimer_restart tcpc_timer_sender_response(struct hrtimer *timer)
 	return HRTIMER_NORESTART;
 }
 
+static enum hrtimer_restart tcpc_timer_sink_activity(struct hrtimer *timer)
+{
+	int index = PD_TIMER_SINK_ACTIVITY;
+	struct tcpc_device *tcpc =
+		container_of(timer, struct tcpc_device, tcpc_timer[index]);
+
+	TCPC_TIMER_TRIGGER();
+	return HRTIMER_NORESTART;
+}
+
 static enum hrtimer_restart tcpc_timer_sink_request(struct hrtimer *timer)
 {
 	int index = PD_TIMER_SINK_REQUEST;
@@ -544,6 +554,16 @@ static enum hrtimer_restart tcpc_timer_sink_request(struct hrtimer *timer)
 static enum hrtimer_restart tcpc_timer_sink_wait_cap(struct hrtimer *timer)
 {
 	int index = PD_TIMER_SINK_WAIT_CAP;
+	struct tcpc_device *tcpc =
+		container_of(timer, struct tcpc_device, tcpc_timer[index]);
+
+	TCPC_TIMER_TRIGGER();
+	return HRTIMER_NORESTART;
+}
+
+static enum hrtimer_restart tcpc_timer_source_activity(struct hrtimer *timer)
+{
+	int index = PD_TIMER_SOURCE_ACTIVITY;
 	struct tcpc_device *tcpc =
 		container_of(timer, struct tcpc_device, tcpc_timer[index]);
 
@@ -646,7 +666,7 @@ static enum hrtimer_restart tcpc_timer_src_recover(struct hrtimer *timer)
 #ifdef CONFIG_USB_PD_REV30
 static enum hrtimer_restart tcpc_timer_ck_no_support(struct hrtimer *timer)
 {
-	int index = PD_TIMER_CK_NOT_SUPPORTED;
+	int index = PD_TIMER_CK_NO_SUPPORT;
 	struct tcpc_device *tcpc =
 		container_of(timer, struct tcpc_device, tcpc_timer[index]);
 
@@ -903,7 +923,7 @@ static enum hrtimer_restart tcpc_timer_rt_legacy_recycle(struct hrtimer *timer)
 
 static enum hrtimer_restart tcpc_timer_rt_discharge(struct hrtimer *timer)
 {
-	int index = TYPEC_RT_TIMER_DISCHARGE;
+	int index = TYPEC_RT_TIMER_AUTO_DISCHARGE;
 	struct tcpc_device *tcpc =
 		container_of(timer, struct tcpc_device, tcpc_timer[index]);
 
@@ -935,7 +955,7 @@ static enum hrtimer_restart tcpc_timer_rt_pe_idle(struct hrtimer *timer)
 #ifdef CONFIG_USB_PD_WAIT_BC12
 static enum hrtimer_restart tcpc_timer_rt_pd_wait_bc12(struct hrtimer *timer)
 {
-	int index = TYPEC_RT_TIMER_PD_WAIT_BC12;
+	int index = TYPEC_RT_TIMER_SINK_WAIT_BC12;
 	struct tcpc_device *tcpc =
 		container_of(timer, struct tcpc_device, tcpc_timer[index]);
 
@@ -1044,7 +1064,7 @@ static void wake_up_work_func(struct work_struct *work)
 	tcpc_typec_enter_lpm_again(tcpc);
 
 	mutex_unlock(&tcpc->typec_lock);
-	__pm_relax(tcpc->wakeup_wake_lock);
+	__pm_relax(&tcpc->wakeup_wake_lock);
 }
 
 static enum alarmtimer_restart
@@ -1053,7 +1073,7 @@ static enum alarmtimer_restart
 	struct tcpc_device *tcpc =
 		container_of(alarm, struct tcpc_device, wake_up_timer);
 
-	__pm_wakeup_event(tcpc->wakeup_wake_lock, 1000);
+	__pm_wakeup_event(&tcpc->wakeup_wake_lock, 1000);
 	schedule_delayed_work(&tcpc->wake_up_work, 0);
 	return ALARMTIMER_NORESTART;
 }
@@ -1277,6 +1297,20 @@ void tcpc_disable_timer(struct tcpc_device *tcpc, uint32_t timer_id)
 	}
 }
 
+void tcpc_timer_reset(struct tcpc_device *tcpc)
+{
+	uint64_t mask;
+	int i;
+
+	mask = tcpc_get_timer_enable_mask(tcpc);
+
+	for (i = 0; i < PD_TIMER_NR; i++)
+		if (mask & RT_MASK64(i))
+			hrtimer_try_to_cancel(&tcpc->tcpc_timer[i]);
+
+	tcpc_reset_timer_enable_mask(tcpc);
+}
+
 #ifdef CONFIG_USB_POWER_DELIVERY
 void tcpc_reset_pe_timer(struct tcpc_device *tcpc)
 {
@@ -1335,21 +1369,24 @@ static void tcpc_handle_timer_triggered(struct tcpc_device *tcpc)
 
 static int tcpc_timer_thread_fn(void *data)
 {
-	struct tcpc_device *tcpc = data;
+	struct tcpc_device *tcpc = param;
+
+	uint64_t *timer_tick;
 	struct sched_param sch_param = {.sched_priority = MAX_RT_PRIO - 1};
-	int ret = 0;
+
+	timer_tick = &tcpc->timer_tick;
 
 	sched_setscheduler(current, SCHED_FIFO, &sch_param);
 
 	while (true) {
-		ret = wait_event_interruptible(tcpc->timer_wait_que,
-					       tcpc_get_timer_tick(tcpc) ||
-					       kthread_should_stop());
-		if (kthread_should_stop() || ret) {
-			dev_notice(&tcpc->dev, "%s exits(%d)\n", __func__, ret);
+		wait_event_interruptible(tcpc->timer_wait_que,
+				((*timer_tick) ? true : false) |
+				tcpc->timer_thead_stop);
+		if (kthread_should_stop() || tcpc->timer_thead_stop)
 			break;
-		}
-		tcpc_handle_timer_triggered(tcpc);
+		do {
+			tcpc_handle_timer_triggered(tcpc);
+		} while (*timer_tick);
 	}
 
 	return 0;
@@ -1360,19 +1397,21 @@ int tcpci_timer_init(struct tcpc_device *tcpc)
 	int i;
 
 	pr_info("PD Timer number = %d\n", PD_TIMER_NR);
-
+	tcpc->timer_task = kthread_create(tcpc_timer_thread, tcpc,
+			"tcpc_timer_%s.%p", dev_name(&tcpc->dev), tcpc);
 	init_waitqueue_head(&tcpc->timer_wait_que);
+
 	tcpc->timer_tick = 0;
 	tcpc->timer_enable_mask = 0;
-	tcpc->timer_task = kthread_run(tcpc_timer_thread_fn, tcpc,
-				       "tcpc_timer_%s", tcpc->desc.name);
+
+	wake_up_process(tcpc->timer_task);
 	for (i = 0; i < PD_TIMER_NR; i++) {
 		hrtimer_init(&tcpc->tcpc_timer[i],
 					CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 		tcpc->tcpc_timer[i].function = tcpc_timer_call[i];
 	}
-	tcpc->wakeup_wake_lock =
-		wakeup_source_register(&tcpc->dev, "tcpc_wakeup_wake_lock");
+	wakeup_source_init(&tcpc->wakeup_wake_lock,
+		"wakeup_wake_lock");
 	INIT_DELAYED_WORK(&tcpc->wake_up_work, wake_up_work_func);
 	alarm_init(&tcpc->wake_up_timer, ALARM_REALTIME, tcpc_timer_wakeup);
 
@@ -1382,13 +1421,22 @@ int tcpci_timer_init(struct tcpc_device *tcpc)
 
 int tcpci_timer_deinit(struct tcpc_device *tcpc)
 {
-	kthread_stop(tcpc->timer_task);
+	uint64_t mask;
+	int i;
+
+	mask = tcpc_get_timer_enable_mask(tcpc);
+
 	mutex_lock(&tcpc->timer_lock);
-	tcpc_reset_timer_range(tcpc, 0, PD_TIMER_NR);
-	mutex_unlock(&tcpc->timer_lock);
-	cancel_delayed_work_sync(&tcpc->wake_up_work);
-	wakeup_source_unregister(tcpc->wakeup_wake_lock);
+	tcpc->timer_thead_stop = true;
+	wake_up_interruptible(&tcpc->timer_wait_que);
+	kthread_stop(tcpc->timer_task);
+	for (i = 0; i < PD_TIMER_NR; i++) {
+		if (mask & RT_MASK64(i))
+			hrtimer_try_to_cancel(&tcpc->tcpc_timer[i]);
+	}
+	wakeup_source_trash(&tcpc->wakeup_wake_lock);
 
 	pr_info("%s : de init OK\n", __func__);
+	mutex_unlock(&tcpc->timer_lock);
 	return 0;
 }

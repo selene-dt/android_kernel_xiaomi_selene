@@ -639,6 +639,7 @@ void pd_dpm_snk_evaluate_caps(struct pd_port *pd_port)
 	} else
 		DPM_INFO("Select SrcCap%d\n", req_info.pos);
 
+	pd_port->tcpc->pd_capable = true;
 	dpm_update_request(pd_port, &req_info);
 
 	if (req_info.pos > 0)
@@ -665,16 +666,18 @@ void pd_dpm_snk_standby_power(struct pd_port *pd_port)
 					 pd_port->request_v_new);
 
 #ifdef CONFIG_USB_PD_VCONN_SAFE5V_ONLY
+	bool vconn_highv_prot;
 	struct tcpc_device *tcpc = pd_port->tcpc;
 	struct pe_data *pe_data = &pd_port->pe_data;
 	bool vconn_highv_prot = pd_port->request_v_new > 5000;
 
-	if (!pe_data->vconn_highv_prot && vconn_highv_prot &&
+	vconn_highv_prot = pd_port->request_v_new > 5000;
+	if (vconn_highv_prot != pe_data->vconn_highv_prot &&
 		tcpc->tcpc_flags & TCPC_FLAGS_VCONN_SAFE5V_ONLY) {
-		PE_INFO("VC_HIGHV_PROT: %d\n", vconn_highv_prot);
-		pe_data->vconn_highv_prot_role = pd_port->vconn_role;
-		pd_set_vconn(pd_port, PD_ROLE_VCONN_OFF);
-		pe_data->vconn_highv_prot = vconn_highv_prot;
+		PE_INFO("VC_HIGHV_PROT: %d\r\n", vconn_highv_prot);
+
+		if (vconn_highv_prot)
+			tcpci_set_vconn(pd_port->tcpc, false);
 	}
 #endif	/* CONFIG_USB_PD_VCONN_SAFE5V_ONLY */
 
@@ -708,7 +711,7 @@ void pd_dpm_snk_standby_power(struct pd_port *pd_port)
 
 	if (ma >= 0) {
 		tcpci_sink_vbus(
-			pd_port->tcpc, type, pd_port->request_v_new, ma);
+			pd_port->tcpc, type, pd_port->request_v, ma);
 	}
 #else
 #ifdef CONFIG_USB_PD_SNK_GOTOMIN
@@ -847,6 +850,7 @@ void pd_dpm_src_evaluate_request(struct pd_port *pd_port)
 	DPM_INFO("RequestCap%d\n", rdo_pos);
 
 	pe_data = &pd_port->pe_data;
+	pd_port->tcpc->pd_capable = true;
 
 	if (dpm_evaluate_request(pd_port, rdo, rdo_pos))  {
 		pe_data->local_selected_cap = rdo_pos;
@@ -1222,6 +1226,15 @@ void pd_dpm_dfp_inform_id(struct pd_port *pd_port, bool ack)
 				payload[0], payload[1], payload[2], payload[3]);
 
 		dpm_dfp_update_partner_id(pd_port, payload);
+
+		pd_port->tcpc->partner_ident.id_header =
+					pd_port->pe_data.partner_vdos[0];
+		pd_port->tcpc->partner_ident.cert_stat =
+					pd_port->pe_data.partner_vdos[1];
+		pd_port->tcpc->partner_ident.product =
+					pd_port->pe_data.partner_vdos[2];
+		if (pd_port->tcpc->partner)
+			typec_partner_set_identity(pd_port->tcpc->partner);
 	}
 
 	if (!pd_port->pe_data.vdm_discard_retry_flag) {
@@ -2315,7 +2328,7 @@ int pd_dpm_core_init(struct pd_port *pd_port)
 	uint8_t svid_ops_nr = ARRAY_SIZE(svdm_svid_ops);
 	struct tcpc_device *tcpc = pd_port->tcpc;
 
-	pd_port->svid_data = devm_kzalloc(&tcpc->dev,
+	pd_port->svid_data = devm_kzalloc(&pd_port->tcpc->dev,
 		sizeof(struct svdm_svid_data) * svid_ops_nr, GFP_KERNEL);
 
 	if (!pd_port->svid_data)
@@ -2332,13 +2345,16 @@ int pd_dpm_core_init(struct pd_port *pd_port)
 	pd_port->svid_data_cnt = j;
 
 #ifdef CONFIG_USB_PD_REV30
-	pd_port->pps_request_wake_lock =
-		wakeup_source_register(&tcpc->dev, "pd_pps_request_wake_lock");
-	init_waitqueue_head(&pd_port->pps_request_wait_que);
-	atomic_set(&pd_port->pps_request, false);
-	pd_port->pps_request_task = kthread_run(pps_request_thread_fn, tcpc,
-						"pps_request_%s",
-						tcpc->desc.name);
+	wakeup_source_init(&pd_port->pps_request_wake_lock,
+		"pd_pps_request_wakelock");
+
+	pd_port->pps_request_task = kthread_create(pps_request_thread_fn,
+		pd_port->tcpc, "pps_request_task_%s",
+		dev_name(&pd_port->tcpc->dev));
+	init_waitqueue_head(&pd_port->pps_request_event_queue);
+	pd_port->pps_request_stop = true;
+	atomic_set(&pd_port->pps_request_event, 0);
+	wake_up_process(pd_port->pps_request_task);
 #endif /* CONFIG_USB_PD_REV30 */
 
 	return 0;

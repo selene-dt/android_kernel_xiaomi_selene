@@ -138,7 +138,7 @@ void pe_unexpected_tx_wait_entry(struct pd_port *pd_port)
 {
 	struct tcpc_device __maybe_unused *tcpc = pd_port->tcpc;
 
-	PE_INFO("##$$123\n");
+	PE_INFO("##$$123\r\n");
 	PE_STATE_DISCARD_AND_UNEXPECTED(pd_port);
 	pd_enable_timer(pd_port, PD_TIMER_SENDER_RESPONSE);
 }
@@ -147,7 +147,7 @@ void pe_send_soft_reset_tx_wait_entry(struct pd_port *pd_port)
 {
 	struct tcpc_device __maybe_unused *tcpc = pd_port->tcpc;
 
-	PE_INFO("##$$124\n");
+	PE_INFO("##$$124\r\n");
 	PE_STATE_DISCARD_AND_UNEXPECTED(pd_port);
 	pd_enable_timer(pd_port, PD_TIMER_SENDER_RESPONSE);
 }
@@ -156,7 +156,7 @@ void pe_recv_soft_reset_tx_wait_entry(struct pd_port *pd_port)
 {
 	struct tcpc_device __maybe_unused *tcpc = pd_port->tcpc;
 
-	PE_INFO("##$$125\n");
+	PE_INFO("##$$125\r\n");
 	PE_STATE_DISCARD_AND_UNEXPECTED(pd_port);
 	pd_enable_timer(pd_port, PD_TIMER_SENDER_RESPONSE);
 }
@@ -165,7 +165,7 @@ void pe_send_soft_reset_standby_entry(struct pd_port *pd_port)
 {
 	struct tcpc_device __maybe_unused *tcpc = pd_port->tcpc;
 
-	PE_INFO("##$$126\n");
+	PE_INFO("##$$126\r\n");
 	PE_STATE_DISCARD_AND_UNEXPECTED(pd_port);
 	pd_put_dpm_ack_event(pd_port);
 }

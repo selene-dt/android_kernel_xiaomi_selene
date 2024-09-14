@@ -117,7 +117,13 @@ static inline bool pd_process_ctrl_msg_vconn_swap(
 	}
 #endif	/* CONFIG_USB_PD_VCONN_SWAP */
 
-	if (!pd_check_rev30(pd_port)) {
+#ifdef CONFIG_USB_PD_REV30
+	if (pd_check_rev30(pd_port)) {
+		PE_TRANSIT_STATE(pd_port,
+			(pd_port->power_role == PD_ROLE_SINK) ?
+			PE_SNK_SEND_NOT_SUPPORTED : PE_SRC_SEND_NOT_SUPPORTED);
+	} else
+#endif	/* CONFIG_USB_PD_REV30 */
 		PE_TRANSIT_STATE(pd_port, PE_REJECT);
 		return true;
 	}
@@ -595,7 +601,7 @@ static inline bool pd_check_rx_pending(struct pd_port *pd_port)
 		PE_INFO("rx_pending\n");
 		pending = true;
 	} else if (!pd_is_msg_empty(tcpc)) {
-		PE_INFO("rx_pending2\n");
+		PE_INFO("rx_pending2\r\n");
 		pending = true;
 	}
 

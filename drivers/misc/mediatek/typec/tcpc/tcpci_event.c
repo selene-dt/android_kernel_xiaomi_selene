@@ -173,7 +173,7 @@ static bool __pd_put_event(struct tcpc_device *tcpc,
 #endif	/* CONFIG_USB_PD_POSTPONE_OTHER_VDM */
 
 	if (tcpc->pd_event_count >= PD_EVENT_BUF_SIZE) {
-		PD_ERR("pd_put_event failed\n");
+		PD_ERR("pd_put_event failed\r\n");
 		return false;
 	}
 
@@ -184,7 +184,7 @@ static bool __pd_put_event(struct tcpc_device *tcpc,
 	tcpc->pd_event_ring_buffer[index] = *pd_event;
 
 	atomic_inc(&tcpc->pending_event);
-	wake_up(&tcpc->event_wait_que);
+	wake_up_interruptible(&tcpc->event_loop_wait_que);
 	return true;
 }
 
@@ -343,13 +343,14 @@ bool pd_put_vdm_event(struct tcpc_device *tcpc,
 
 	if (from_port_partner &&
 		pd_is_init_attention_event(tcpc, pd_event)) {
-		TCPC_DBG("AttEvt\n");
+		TCPC_DBG("AttEvt\r\n");
 		ignore_evt = true;
 		tcpc->pd_pending_vdm_attention = true;
 		tcpc->pd_attention_vdm_msg = *pd_msg;
 
+		/* do not really wake up process*/
 		atomic_inc(&tcpc->pending_event);
-		wake_up(&tcpc->event_wait_que);
+		wake_up_interruptible(&tcpc->event_loop_wait_que);
 	}
 
 	if (tcpc->pd_pending_vdm_event && (!ignore_evt)) {
@@ -361,7 +362,7 @@ bool pd_put_vdm_event(struct tcpc_device *tcpc,
 			if (pd_event_ctrl_msg_match(
 					&tcpc->pd_vdm_event,
 					PD_CTRL_GOOD_CRC)) {
-				TCPC_DBG2("PostponeVDM GoodCRC\n");
+				TCPC_DBG2("PostponeVDM GoodCRC\r\n");
 				tcpc->pd_pending_vdm_good_crc = true;
 			}
 
@@ -382,6 +383,7 @@ bool pd_put_vdm_event(struct tcpc_device *tcpc,
 	if (from_port_partner) {
 
 		PD_BUG_ON(pd_msg == NULL);
+		/* pd_msg->time_stamp = 0; */
 		tcpc->pd_last_vdm_msg = *pd_msg;
 		reset_pe_vdm_state(tcpc, pd_msg->payload[0]);
 
@@ -392,8 +394,8 @@ bool pd_put_vdm_event(struct tcpc_device *tcpc,
 #endif	/* CONFIG_USB_PD_POSTPONE_FIRST_VDM */
 	}
 
-	atomic_inc(&tcpc->pending_event);
-	wake_up(&tcpc->event_wait_que);
+	atomic_inc(&tcpc->pending_event); /* do not really wake up process*/
+	wake_up_interruptible(&tcpc->event_loop_wait_que);
 	mutex_unlock(&tcpc->access_lock);
 
 	return true;
@@ -407,8 +409,8 @@ bool pd_put_last_vdm_event(struct tcpc_device *tcpc)
 	mutex_lock(&tcpc->access_lock);
 
 	tcpc->pd_pending_vdm_discard = true;
-	atomic_inc(&tcpc->pending_event);
-	wake_up(&tcpc->event_wait_que);
+	atomic_inc(&tcpc->pending_event); /* do not really wake up process*/
+	wake_up_interruptible(&tcpc->event_loop_wait_que);
 
 	/* If the last VDM event isn't INIT event, don't put it again */
 	if (!reset_pe_vdm_state(tcpc, pd_msg->payload[0])) {
@@ -495,8 +497,8 @@ static bool __pd_put_deferred_tcp_event(
 	tcpc->tcp_event_count++;
 	tcpc->tcp_event_ring_buffer[index] = *tcp_event;
 
-	atomic_inc(&tcpc->pending_event);
-	wake_up(&tcpc->event_wait_que);
+	atomic_inc(&tcpc->pending_event); /* do not really wake up process*/
+	wake_up_interruptible(&tcpc->event_loop_wait_que);
 	return true;
 }
 
@@ -510,19 +512,19 @@ bool pd_put_deferred_tcp_event(
 	mutex_lock(&tcpc->access_lock);
 
 	if (!tcpc->pd_pe_running || tcpc->pd_wait_pe_idle) {
-		PD_ERR("pd_put_tcp_event failed0\n");
+		PD_ERR("pd_put_tcp_event failed0\r\n");
 		ret = false;
 		goto unlock_out;
 	}
 
 	if (tcpc->tcp_event_count >= TCP_EVENT_BUF_SIZE) {
-		PD_ERR("pd_put_tcp_event failed1\n");
+		PD_ERR("pd_put_tcp_event failed1\r\n");
 		ret = false;
 		goto unlock_out;
 	}
 
 	if (tcpc->pd_wait_hard_reset_complete) {
-		PD_ERR("pd_put_tcp_event failed2\n");
+		PD_ERR("pd_put_tcp_event failed2\r\n");
 		ret = false;
 		goto unlock_out;
 	}
@@ -723,6 +725,9 @@ static inline bool __pd_put_pe_event(
 	return __pd_put_event(tcpc, &evt, false);
 }
 
+/*K19A WXYFB-590 K19A charger by wangqqi at 2021/4/1 start*/
+extern uint8_t     typec_cc_orientation;
+/*K19A WXYFB-590 K19A charger by wangqi at 2021/4/1 end*/
 bool __pd_put_cc_attached_event(
 		struct tcpc_device *tcpc, uint8_t type)
 {
@@ -733,9 +738,19 @@ bool __pd_put_cc_attached_event(
 		.pd_msg = NULL,
 	};
 
-	switch (type) {
+	switch (tcpc->typec_attach_new) {
 	case TYPEC_ATTACHED_SNK:
 	case TYPEC_ATTACHED_SRC:
+		tcpc->pd_pe_running = true;
+		tcpc->pd_wait_pe_idle = false;
+/*K19A WXYFB-590 K19A charger by wangqqi at 2021/4/1 start*/
+		if(tcpc->typec_polarity == 0)
+			typec_cc_orientation = 1;
+		else
+			typec_cc_orientation = 2;
+/*K19A WXYFB-590 K19A charger by wangqqi at 2021/4/1 end*/
+		break;
+#ifdef CONFIG_TYPEC_CAP_DBGACC_SNK
 	case TYPEC_ATTACHED_DBGACC_SNK:
 		tcpc->pd_pe_running = true;
 		tcpc->pd_wait_pe_idle = false;
@@ -758,14 +773,14 @@ bool pd_put_cc_attached_event(
 #ifdef CONFIG_USB_PD_WAIT_BC12
 	if ((type == TYPEC_ATTACHED_SNK || type == TYPEC_ATTACHED_DBGACC_SNK) &&
 		mt_get_charger_type() == CHARGER_UNKNOWN) {
-		tcpc->pd_wait_bc12_count = 1;
-		tcpc_enable_timer(tcpc, TYPEC_RT_TIMER_PD_WAIT_BC12);
+		tcpc->sink_wait_bc12_count = 1;
+		tcpc_enable_timer(tcpc, TYPEC_RT_TIMER_SINK_WAIT_BC12);
 		mutex_unlock(&tcpc->access_lock);
 		return ret;
 	}
-	tcpc->pd_wait_bc12_count = 0;
-	tcpc_disable_timer(tcpc, TYPEC_RT_TIMER_PD_WAIT_BC12);
-#endif /* CONFIG_USB_PD_WAIT_BC12 */
+	tcpc->sink_wait_bc12_count = 0;
+	tcpc_disable_timer(tcpc, TYPEC_RT_TIMER_SINK_WAIT_BC12);
+#endif /* CONFIG_TYPEC_WAIT_BC12 */
 #endif /* CONFIG_USB_POWER_DELIVERY */
 
 	ret = __pd_put_cc_attached_event(tcpc, type);
@@ -780,10 +795,10 @@ void pd_put_cc_detached_event(struct tcpc_device *tcpc)
 	mutex_lock(&tcpc->access_lock);
 
 #ifdef CONFIG_USB_POWER_DELIVERY
-#ifdef CONFIG_USB_PD_WAIT_BC12
-	tcpc->pd_wait_bc12_count = 0;
-	tcpc_disable_timer(tcpc, TYPEC_RT_TIMER_PD_WAIT_BC12);
-#endif /* CONFIG_USB_PD_WAIT_BC12 */
+#ifdef CONFIG_TYPEC_WAIT_BC12
+	tcpc->sink_wait_bc12_count = 0;
+	tcpc_disable_timer(tcpc, TYPEC_RT_TIMER_SINK_WAIT_BC12);
+#endif /* CONFIG_TYPEC_WAIT_BC12 */
 #endif /* CONFIG_USB_POWER_DELIVERY */
 
 	tcpci_notify_hard_reset_state(
@@ -799,7 +814,9 @@ void pd_put_cc_detached_event(struct tcpc_device *tcpc)
 	tcpc->pd_wait_vbus_once = PD_WAIT_VBUS_DISABLE;
 	tcpc->pd_bist_mode = PD_BIST_MODE_DISABLE;
 	tcpc->pd_ping_event_pending = false;
-
+/*K19A WXYFB-590 K19A charger by wangqqi at 2021/4/1 start*/
+	typec_cc_orientation = 0;
+/*K19A WXYFB-590 K19A charger by wangqqi at 2021/4/1 end*/
 #ifdef CONFIG_USB_PD_DIRECT_CHARGE
 	tcpc->pd_during_direct_charge = false;
 #endif	/* CONFIG_USB_PD_DIRECT_CHARGE */
@@ -876,7 +893,7 @@ bool pd_put_pd_msg_event(struct tcpc_device *tcpc, struct pd_msg *pd_msg)
 	/* bist mode */
 	mutex_lock(&tcpc->access_lock);
 	if (tcpc->pd_bist_mode != PD_BIST_MODE_DISABLE) {
-		TCPC_DBG2("BIST_MODE_RX\n");
+		TCPC_DBG2("BIST_MODE_RX\r\n");
 		__pd_free_event(tcpc, &evt);
 		mutex_unlock(&tcpc->access_lock);
 		return 0;
@@ -891,7 +908,7 @@ bool pd_put_pd_msg_event(struct tcpc_device *tcpc, struct pd_msg *pd_msg)
 		tcpc->pd_discard_pending = false;
 
 		if ((cmd == PD_CTRL_GOOD_CRC) && (cnt == 0)) {
-			TCPC_DBG2("RETRANSMIT\n");
+			TCPC_DBG2("RETRANSMIT\r\n");
 			__pd_free_event(tcpc, &evt);
 			mutex_unlock(&tcpc->access_lock);
 
@@ -907,7 +924,7 @@ bool pd_put_pd_msg_event(struct tcpc_device *tcpc, struct pd_msg *pd_msg)
 	if (cnt == 0 && cmd == PD_CTRL_PING) {
 		/* reset ping_test_mode only if cc_detached */
 		if (!tcpc->pd_ping_event_pending) {
-			TCPC_INFO("ping_test_mode\n");
+			TCPC_INFO("ping_test_mode\r\n");
 			tcpc->pd_ping_event_pending = true;
 			tcpci_set_bist_test_mode(tcpc, true);
 		} else {
@@ -988,9 +1005,11 @@ void pd_put_vbus_safe0v_event(struct tcpc_device *tcpc)
 #endif	/* CONFIG_USB_PD_SAFE0V_TIMEOUT */
 
 	mutex_lock(&tcpc->access_lock);
+	if (tcpc->pd_wait_vbus_once == PD_WAIT_VBUS_SAFE0V_ONCE)
+		tcpci_enable_force_discharge(tcpc, false, 0);
+
 	if (tcpc->pd_wait_vbus_once == PD_WAIT_VBUS_SAFE0V_ONCE) {
 		tcpc->pd_wait_vbus_once = PD_WAIT_VBUS_DISABLE;
-		tcpci_enable_force_discharge(tcpc, false, 0);
 		__pd_put_hw_event(tcpc, PD_HW_VBUS_SAFE0V);
 	}
 	mutex_unlock(&tcpc->access_lock);
@@ -999,11 +1018,13 @@ void pd_put_vbus_safe0v_event(struct tcpc_device *tcpc)
 void pd_put_vbus_stable_event(struct tcpc_device *tcpc)
 {
 	mutex_lock(&tcpc->access_lock);
-	if (tcpc->pd_wait_vbus_once == PD_WAIT_VBUS_STABLE_ONCE) {
-		tcpc->pd_wait_vbus_once = PD_WAIT_VBUS_DISABLE;
 #ifdef CONFIG_USB_PD_SRC_HIGHCAP_POWER
+	if (tcpc->pd_wait_vbus_once == PD_WAIT_VBUS_STABLE_ONCE)
 		tcpci_enable_force_discharge(tcpc, false, 0);
 #endif	/* CONFIG_USB_PD_SRC_HIGHCAP_POWER */
+
+	if (tcpc->pd_wait_vbus_once == PD_WAIT_VBUS_STABLE_ONCE) {
+		tcpc->pd_wait_vbus_once = PD_WAIT_VBUS_DISABLE;
 		__pd_put_hw_event(tcpc, PD_HW_VBUS_STABLE);
 	}
 	mutex_unlock(&tcpc->access_lock);
@@ -1096,9 +1117,7 @@ void pd_notify_pe_error_recovery(struct pd_port *pd_port)
 	__tcp_event_buf_reset(tcpc, TCP_DPM_RET_DROP_ERROR_REOCVERY);
 	mutex_unlock(&tcpc->access_lock);
 
-	tcpci_lock_typec(tcpc);
 	tcpc_typec_error_recovery(tcpc);
-	tcpci_unlock_typec(tcpc);
 }
 
 #ifdef CONFIG_USB_PD_RECV_HRESET_COUNTER
@@ -1290,7 +1309,7 @@ void pd_notify_pe_src_explicit_contract(struct pd_port *pd_port)
 		return;
 	}
 
-	if (tcpc->typec_local_rp_level == TYPEC_RP_DFT)
+	if (tcpc->typec_local_rp_level == TYPEC_CC_RP_DFT)
 		pull = TYPEC_CC_RP_1_5;
 
 #ifdef CONFIG_USB_PD_REV30_COLLISION_AVOID
@@ -1333,7 +1352,7 @@ void pd_notify_pe_direct_charge(struct pd_port *pd_port, bool en)
 /* ---- init  ---- */
 static int tcpc_event_thread_fn(void *data)
 {
-	struct tcpc_device *tcpc = data;
+	struct tcpc_device *tcpc = param;
 	struct sched_param sch_param = {.sched_priority = MAX_RT_PRIO - 2};
 	int ret = 0;
 
@@ -1347,16 +1366,15 @@ static int tcpc_event_thread_fn(void *data)
 	}
 
 	while (true) {
-		ret = wait_event_interruptible(tcpc->event_wait_que,
-				atomic_read(&tcpc->pending_event) ||
-				kthread_should_stop());
-		if (kthread_should_stop() || ret) {
-			dev_notice(&tcpc->dev, "%s exits(%d)\n", __func__, ret);
+		wait_event_interruptible(tcpc->event_loop_wait_que,
+				atomic_read(&tcpc->pending_event) |
+				tcpc->event_loop_thead_stop);
+		if (kthread_should_stop() || tcpc->event_loop_thead_stop)
 			break;
 		}
 		do {
 			atomic_dec_if_positive(&tcpc->pending_event);
-		} while (pd_policy_engine_run(tcpc) && !kthread_should_stop());
+		} while (pd_policy_engine_run(tcpc));
 	}
 
 	return 0;
@@ -1364,18 +1382,23 @@ static int tcpc_event_thread_fn(void *data)
 
 int tcpci_event_init(struct tcpc_device *tcpc)
 {
-	init_waitqueue_head(&tcpc->event_wait_que);
+	tcpc->event_task = kthread_create(tcpc_event_thread, tcpc,
+			"tcpc_event_%s.%p", dev_name(&tcpc->dev), tcpc);
+	tcpc->event_loop_thead_stop = false;
+
+	init_waitqueue_head(&tcpc->event_loop_wait_que);
 	atomic_set(&tcpc->pending_event, 0);
-	tcpc->event_task = kthread_run(tcpc_event_thread_fn, tcpc,
-				       "tcpc_event_%s", tcpc->desc.name);
+	wake_up_process(tcpc->event_task);
 
 	return 0;
 }
 
 int tcpci_event_deinit(struct tcpc_device *tcpc)
 {
-	if (tcpc->event_task != NULL)
+	if (tcpc->event_task != NULL) {
+		tcpc->event_loop_thead_stop = true;
+		wake_up_interruptible(&tcpc->event_loop_wait_que);
 		kthread_stop(tcpc->event_task);
-
+	}
 	return 0;
 }

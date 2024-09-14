@@ -349,7 +349,7 @@ static inline uint8_t dp_dfp_u_select_mode(struct pd_port *pd_port,
 	struct svdm_mode *remote, *local;
 	int i, j;
 	int match_score, best_match_score = 0;
-	int __maybe_unused local_index = -1, remote_index = -1;
+	int local_index = -1, remote_index = -1;
 	struct tcpc_device __maybe_unused *tcpc = pd_port->tcpc;
 
 	local = &svid_data->local_mode;
@@ -602,7 +602,7 @@ static inline bool dp_dfp_u_update_dp_connected(struct pd_port *pd_port)
 			pd_port, dp_local_connected, false);
 
 		if (!valid_connected) {
-			DP_INFO("BOTH_SEL_ONE\n");
+			DP_INFO("BOTH_SEL_ONE\r\n");
 			pd_put_tcp_vdm_event(pd_port,
 				TCP_DPM_EVT_DP_STATUS_UPDATE);
 		}

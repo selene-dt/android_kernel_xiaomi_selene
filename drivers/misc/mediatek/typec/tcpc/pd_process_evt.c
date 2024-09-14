@@ -411,17 +411,6 @@ bool pd_process_protocol_error(
 #endif
 	struct tcpc_device __maybe_unused *tcpc = pd_port->tcpc;
 
-	if (pd_port->pe_data.pe_state_flags &
-			PE_STATE_FLAG_IGNORE_UNKNOWN_EVENT) {
-		PE_INFO("Ignore Unknown Event\n");
-		goto out;
-	}
-
-	if (pd_check_pe_during_hard_reset(pd_port)) {
-		PE_INFO("Ignore Event during HReset\n");
-		goto out;
-	}
-
 	switch (pd_port->pe_state_curr) {
 	case PE_SNK_TRANSITION_SINK:
 		/* fall through */

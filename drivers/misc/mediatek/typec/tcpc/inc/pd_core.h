@@ -1301,14 +1301,6 @@ static inline void pd_disable_timer(struct pd_port *pd_port, uint32_t timer_id)
 	return tcpc_disable_timer(pd_port->tcpc, timer_id);
 }
 
-static inline void pd_disable_pe_state_timer(struct pd_port *pd_port)
-{
-	struct pe_data *pe_data = &pd_port->pe_data;
-
-	pd_disable_timer(pd_port, pe_data->pe_state_timer);
-	pe_data->pe_state_timer = 0;
-}
-
 void pd_reset_pe_timer(struct pd_port *pd_port);
 
 /* ---- pd_event ---- */

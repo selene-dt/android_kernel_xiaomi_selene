@@ -402,7 +402,6 @@ static inline bool pd_process_timer_msg(
 #ifndef CONFIG_USB_PD_DBG_IGRONE_TIMEOUT
 	struct tcpc_device __maybe_unused *tcpc = pd_port->tcpc;
 #endif	/* CONFIG_USB_PD_DBG_IGRONE_TIMEOUT */
-	struct pe_data __maybe_unused *pe_data = &pd_port->pe_data;
 
 	switch (pd_event->msg) {
 	case PD_TIMER_SINK_REQUEST:
